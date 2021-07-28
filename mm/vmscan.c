@@ -1077,6 +1077,12 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 	LIST_HEAD(free_pages);
 	unsigned int nr_reclaimed = 0;
 	unsigned int pgactivate = 0;
+	extern int SIGBALLOON_TARGET_TGID;
+	int should_swapout = 1;
+	if(SIGBALLOON_TARGET_TGID!=-1){
+		if(!(sc->gfp_mask & GFP_SIGBALLOON))
+			should_swapout = 0;
+	}
 
 	memset(stat, 0, sizeof(*stat));
 	cond_resched();
@@ -1222,12 +1228,21 @@ static unsigned int shrink_page_list(struct list_head *page_list,
 		case PAGEREF_ACTIVATE:
 			goto activate_locked;
 		case PAGEREF_KEEP:
-			stat->nr_ref_keep += nr_pages;
-			goto keep_locked;
 		case PAGEREF_RECLAIM:
 		case PAGEREF_RECLAIM_CLEAN:
 			; /* try to reclaim the page below */
 		}
+
+		/**
+		 * 
+		 * If some process has registered for SIGBALLOON
+		 * then don't swap anonymous pages unless this invocation
+		 * of shrink_page_list is from reclaim_pages.
+		 * 
+		 */
+
+		if (!should_swapout)
+			goto keep_locked;
 
 		/*
 		 * Anonymous process memory has backing store?
@@ -2120,7 +2135,7 @@ unsigned long reclaim_pages(struct list_head *page_list)
 	struct reclaim_stat dummy_stat;
 	struct page *page;
 	struct scan_control sc = {
-		.gfp_mask = GFP_KERNEL,
+		.gfp_mask = GFP_KERNEL | GFP_SIGBALLOON,
 		.priority = DEF_PRIORITY,
 		.may_writepage = 1,
 		.may_unmap = 1,
@@ -2254,6 +2269,11 @@ static void get_scan_count(struct lruvec *lruvec, struct scan_control *sc,
 	enum scan_balance scan_balance;
 	unsigned long ap, fp;
 	enum lru_list lru;
+
+	if(sc->gfp_mask & GFP_SIGBALLOON){
+		scan_balance = SCAN_ANON;
+		goto out;
+	}
 
 	/* If we have no swap space, do not bother scanning anon pages. */
 	if (!sc->may_swap || mem_cgroup_get_nr_swap_pages(memcg) <= 0) {
@@ -4036,6 +4056,44 @@ unsigned long shrink_all_memory(unsigned long nr_to_reclaim)
 	return nr_reclaimed;
 }
 #endif /* CONFIG_HIBERNATION */
+
+
+/**
+ * @Author Vimal Patel (vimalm@iisc.ac.in)
+ * Copy of shrink_all_memory modified as needed
+ * and used to push pages swaped out by sys_swapout 
+ * to free list quickly.
+ * 
+ * Called from sys_swapout.
+ */
+unsigned long sigballoon_shrink_all_memory(unsigned long nr_to_reclaim)
+{
+	struct scan_control sc = {
+		.nr_to_reclaim = nr_to_reclaim,
+		.gfp_mask = GFP_HIGHUSER_MOVABLE | GFP_SIGBALLOON,
+		.reclaim_idx = MAX_NR_ZONES - 1,
+		.priority = DEF_PRIORITY,
+		.may_writepage = 1,
+		.may_unmap = 0,
+		.may_swap = 0,
+		.hibernation_mode = 1,
+	};
+	struct zonelist *zonelist = node_zonelist(numa_node_id(), sc.gfp_mask);
+	unsigned long nr_reclaimed;
+	unsigned int noreclaim_flag;
+
+	fs_reclaim_acquire(sc.gfp_mask);
+	noreclaim_flag = memalloc_noreclaim_save();
+	set_task_reclaim_state(current, &sc.reclaim_state);
+
+	nr_reclaimed = do_try_to_free_pages(zonelist, &sc);
+
+	set_task_reclaim_state(current, NULL);
+	memalloc_noreclaim_restore(noreclaim_flag);
+	fs_reclaim_release(sc.gfp_mask);
+
+	return nr_reclaimed;
+}
 
 /*
  * This kswapd start function will be called by init and node-hot-add.

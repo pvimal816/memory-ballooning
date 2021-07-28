@@ -80,6 +80,8 @@
 #include "shuffle.h"
 #include "page_reporting.h"
 
+#include "../sigballoon/sigballoon.h"
+
 /* Free Page Internal flags: for internal, non-pcp variants of free_pages(). */
 typedef int __bitwise fpi_t;
 
@@ -4970,6 +4972,9 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
 	gfp_t alloc_mask; /* The gfp_t that was actually used for allocation */
 	struct alloc_context ac = { };
+	
+	extern int SIGBALLOON_TARGET_TGID;
+	extern int SIGBALLOON_TARGET_NOTIFIED;
 
 	/*
 	 * There are several places where we assume that the order value is sane
@@ -4990,6 +4995,56 @@ __alloc_pages_nodemask(gfp_t gfp_mask, unsigned int order, int preferred_nid,
 	 * memory until all local zones are considered.
 	 */
 	alloc_flags |= alloc_flags_nofragment(ac.preferred_zoneref->zone, gfp_mask);
+
+	/*
+	* check if some process has registered 
+	* for SIGBALLOON signal
+	*/
+	if (SIGBALLOON_TARGET_TGID != -1) {
+		/*
+		* check if enough free memory is available
+		*/
+		if ((global_zone_page_state(NR_FREE_PAGES) << 2) <
+		    (1 << (order + 2)) + SIGBALLOON_FREE_MEMORY_THRESHOLD) {
+			if (!SIGBALLOON_TARGET_NOTIFIED) {
+				/*
+				* Send the SIGBALLOON signal exactly when
+				* the "Occurence of low memory" event occurs.
+				* 
+				* "Occurence of low memory" is an event
+				* which occurs exactly when the amount of 
+				* free memory in the system falls below
+				* SIGBALLOON_FREE_MEMORY_THRESHOLD (which is 
+				* currrently set to 1000000 KB) 
+				*
+				*/
+				extern struct task_struct *find_task_by_vpid(
+					pid_t nr);
+				struct task_struct *target = find_task_by_vpid(
+					SIGBALLOON_TARGET_TGID);
+
+				if (target != NULL) {
+					do_send_sig_info(SIGBALLOON,
+							 SEND_SIG_PRIV, target,
+							 PIDTYPE_TGID);
+					SIGBALLOON_TARGET_NOTIFIED = 1;
+				} else {
+					/*
+					* If target is NULL the process which registered 
+					* for SIGBALLOON has been terminated. So, enable 
+					* the normal swapping again.
+					*/
+					SIGBALLOON_TARGET_TGID = -1;
+				}
+			}
+		} else {
+			/* more then required free memory is available
+			*  so will send the SIGBALLOON signal next time 
+			*  when free memory falls below the limit.
+			*/
+			SIGBALLOON_TARGET_NOTIFIED = 0;
+		}
+	}
 
 	/* First allocation attempt */
 	page = get_page_from_freelist(alloc_mask, order, alloc_flags, &ac);
