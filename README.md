@@ -1,0 +1,1 @@
+main.c is a sample application to demonstrate the use of sigballon kernel API. This application is intended to run on our custom kernel with the support of sigballoon related system calls. So, you may clone the kernel branch to install out custom kernel and then you can run the main.c.
